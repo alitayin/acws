@@ -7,10 +7,8 @@ import httpProxy from 'http-proxy';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import crypto from 'crypto';
-import path from 'path';
 import { ChronikClient } from 'chronik-client';
 import { Level } from 'level';
-import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import {
   buildCorsOptions,
@@ -932,14 +930,6 @@ for (const [method, routePath] of proxyRouteDefinitions) {
   proxyApp[method](routePath, forwardToHono);
 }
 
-function isExecutedDirectly() {
-  if (!process.argv[1]) {
-    return false;
-  }
-
-  return path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-}
-
 function registerSignalHandlers() {
   const handleShutdown = async (signal) => {
     try {
@@ -961,7 +951,7 @@ function registerSignalHandlers() {
   });
 }
 
-if (parseBoolean(process.env.ACWS_AUTOSTART, true) && isExecutedDirectly()) {
+if (parseBoolean(process.env.ACWS_AUTOSTART, process.env.NODE_ENV !== 'test')) {
   registerSignalHandlers();
   startServers().catch((error) => {
     console.error('Failed to start ACWS service:', error);
