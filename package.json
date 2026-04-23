@@ -1,0 +1,27 @@
+{
+  "name": "acws",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "body-parser": "^1.20.3",
+    "chronik-client": "^2.1.1",
+    "cors": "^2.8.5",
+    "ecash-agora": "^0.2.0-rc",
+    "ecash-lib": "^1.1.0",
+    "ecashaddrjs": "^1.6.2",
+    "express": "^4.21.1",
+    "hono": "^4.7.2",
+    "http-proxy": "^1.18.1",
+    "level": "^9.0.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "pg": "^8.13.1",
+    "pm2": "^5.4.3",
+    "ws": "^8.18.0"
+  }
+}
