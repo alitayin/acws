@@ -23,6 +23,23 @@ npm start
 npm test
 ```
 
+## PM2
+
+```bash
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup
+```
+
+Useful commands:
+
+```bash
+pm2 status
+pm2 logs acws
+pm2 restart acws
+pm2 stop acws
+```
+
 ## Notes
 
 - Order keys are expected to use `tokenId|address`
