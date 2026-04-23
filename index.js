@@ -38,13 +38,26 @@ const runtimeConfig = {
   tlsCertPath: normalizeOptionalString(process.env.TLS_CERT_PATH),
   tlsCaPath: normalizeOptionalString(process.env.TLS_CA_PATH),
   redirectHost: normalizeOptionalString(process.env.REDIRECT_HOST),
-  corsOrigin: normalizeOptionalString(process.env.CORS_ORIGIN) || '*',
+  corsOrigin:
+    normalizeOptionalString(process.env.CORS_ORIGIN) || 'https://agora.cash,https://www.agora.cash',
   balanceCacheMs: parseNumber(process.env.BALANCE_CACHE_MS, 5 * 60 * 1000),
   balanceRefreshMs: parseNumber(process.env.BALANCE_REFRESH_MS, 60 * 1000),
   requestBodyLimit: normalizeOptionalString(process.env.JSON_BODY_LIMIT) || '1mb',
 };
 
-const FORWARDED_REQUEST_HEADERS = ['content-type', 'authorization', 'x-request-id'];
+const FORWARDED_REQUEST_HEADERS = [
+  'accept',
+  'content-type',
+  'authorization',
+  'origin',
+  'referer',
+  'user-agent',
+  'x-request-id',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+];
 
 const runtimeState = {
   dbReady: false,
@@ -57,6 +70,32 @@ const runtimeState = {
 };
 
 const pendingBalanceRequests = new Map();
+
+function getRequestIp(headers) {
+  const forwardedFor = headers['x-forwarded-for'] || headers.get?.('x-forwarded-for');
+  if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+    return forwardedFor.split(',')[0].trim();
+  }
+
+  return (
+    headers['x-real-ip'] ||
+    headers.get?.('x-real-ip') ||
+    headers['cf-connecting-ip'] ||
+    headers.get?.('cf-connecting-ip') ||
+    'unknown'
+  );
+}
+
+function logApiEvent(message, details = {}) {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      service: 'acws',
+      message,
+      ...details,
+    }),
+  );
+}
 
 function loadTlsCredentials() {
   if (!runtimeConfig.tlsEnabled) {
@@ -83,6 +122,21 @@ const proxyApp = express();
 proxyApp.set('trust proxy', true);
 proxyApp.use(express.json({ limit: runtimeConfig.requestBodyLimit }));
 proxyApp.use(express.urlencoded({ extended: true }));
+
+proxyApp.use((req, _res, next) => {
+  if (req.path.startsWith('/orders/push/') || req.path.startsWith('/orders/check-hash/')) {
+    logApiEvent('proxy.request.received', {
+      route: req.path,
+      method: req.method,
+      origin: req.headers.origin || 'unknown',
+      ip: getRequestIp(req.headers),
+      accessControlRequestMethod: req.headers['access-control-request-method'] || null,
+    });
+  }
+
+  next();
+});
+
 proxyApp.use(cors(buildCorsOptions(runtimeConfig.corsOrigin)));
 
 const HONO_API = `http://${runtimeConfig.internalHost}:${runtimeConfig.honoPort}`;
@@ -563,10 +617,28 @@ app.post('/orders/push/:address', async (c) => {
   try {
     const address = c.req.param('address');
     const rawBody = await c.req.text();
+    const requestOrigin = c.req.header('origin') || 'unknown';
+    const requestIp = getRequestIp(c.req.raw.headers);
+
+    logApiEvent('orders.push.received', {
+      route: '/orders/push/:address',
+      address,
+      origin: requestOrigin,
+      ip: requestIp,
+      bodyLength: rawBody.length,
+    });
+
     let newOrdersData;
     try {
       newOrdersData = JSON.parse(rawBody);
     } catch (parseError) {
+      logApiEvent('orders.push.invalid_json', {
+        route: '/orders/push/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+        error: parseError.message,
+      });
       return c.json(
         { success: false, error: '无效的 JSON 数据', details: parseError.message },
         400,
@@ -575,6 +647,12 @@ app.post('/orders/push/:address', async (c) => {
 
     const orderCount = Object.keys(newOrdersData).length;
     if (orderCount === 0) {
+      logApiEvent('orders.push.empty_payload', {
+        route: '/orders/push/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+      });
       return c.json(
         {
           success: false,
@@ -588,6 +666,13 @@ app.post('/orders/push/:address', async (c) => {
 
     const validationResult = validateOrdersData(newOrdersData);
     if (!validationResult.valid) {
+      logApiEvent('orders.push.validation_failed', {
+        route: '/orders/push/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+        errorCount: validationResult.errors.length,
+      });
       return c.json(
         { success: false, error: '订单数据验证失败', details: validationResult.errors },
         400,
@@ -599,6 +684,13 @@ app.post('/orders/push/:address', async (c) => {
     const hasExistingOrders = addressOrderKeys.length > 0;
     const invalidKeys = Object.keys(newOrdersData).filter((key) => !isOrderKeyForAddress(key, address));
     if (invalidKeys.length > 0) {
+      logApiEvent('orders.push.invalid_keys', {
+        route: '/orders/push/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+        invalidKeyCount: invalidKeys.length,
+      });
       return c.json(
         { success: false, error: '订单数据包含不属于该地址的订单', invalidKeys },
         400,
@@ -609,8 +701,22 @@ app.post('/orders/push/:address', async (c) => {
       const mergedData = { ...serverOrdersData, ...newOrdersData };
       try {
         await writeOrdersData(mergedData);
+        logApiEvent('orders.push.created', {
+          route: '/orders/push/:address',
+          address,
+          origin: requestOrigin,
+          ip: requestIp,
+          orderCount,
+        });
         return c.json({ success: true, message: '订单数据已完全更新' });
       } catch (writeError) {
+        logApiEvent('orders.push.write_failed', {
+          route: '/orders/push/:address',
+          address,
+          origin: requestOrigin,
+          ip: requestIp,
+          error: writeError.message,
+        });
         return c.json({ success: false, error: writeError.message }, 500);
       }
     } else {
@@ -644,14 +750,43 @@ app.post('/orders/push/:address', async (c) => {
       if (updated) {
         try {
           await writeOrdersData(updatedOrdersData);
+          logApiEvent('orders.push.updated', {
+            route: '/orders/push/:address',
+            address,
+            origin: requestOrigin,
+            ip: requestIp,
+            orderCount,
+            removedOrderCount: removedOrders.length,
+          });
           return c.json({ success: true, message: '订单数据已更新', removedOrders });
         } catch (writeError) {
+          logApiEvent('orders.push.write_failed', {
+            route: '/orders/push/:address',
+            address,
+            origin: requestOrigin,
+            ip: requestIp,
+            error: writeError.message,
+          });
           return c.json({ success: false, error: writeError.message }, 500);
         }
       }
+      logApiEvent('orders.push.no_change', {
+        route: '/orders/push/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+        orderCount,
+      });
       return c.json({ success: true, message: '无需更新，数据未变化' });
     }
   } catch (error) {
+    logApiEvent('orders.push.unhandled_error', {
+      route: '/orders/push/:address',
+      address: c.req.param('address'),
+      origin: c.req.header('origin') || 'unknown',
+      ip: getRequestIp(c.req.raw.headers),
+      error: error.message,
+    });
     return c.json({ success: false, error: error.message }, 500);
   }
 });
@@ -659,8 +794,28 @@ app.post('/orders/push/:address', async (c) => {
 app.post('/orders/check-hash/:address', async (c) => {
   try {
     const address = c.req.param('address');
+    const requestOrigin = c.req.header('origin') || 'unknown';
+    const requestIp = getRequestIp(c.req.raw.headers);
     const { orderHashes: clientOrderHashes } = await c.req.json();
+
+    logApiEvent('orders.check_hash.received', {
+      route: '/orders/check-hash/:address',
+      address,
+      origin: requestOrigin,
+      ip: requestIp,
+      orderHashCount:
+        clientOrderHashes && typeof clientOrderHashes === 'object' && !Array.isArray(clientOrderHashes)
+          ? Object.keys(clientOrderHashes).length
+          : 0,
+    });
+
     if (!clientOrderHashes || typeof clientOrderHashes !== 'object' || Array.isArray(clientOrderHashes)) {
+      logApiEvent('orders.check_hash.invalid_payload', {
+        route: '/orders/check-hash/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+      });
       return c.json({ match: false, error: 'orderHashes 必须是对象' }, 400);
     }
     const serverOrdersData = await readOrdersData();
@@ -671,6 +826,12 @@ app.post('/orders/check-hash/:address', async (c) => {
       }
     });
     if (Object.keys(addressOrders).length === 0) {
+      logApiEvent('orders.check_hash.no_server_orders', {
+        route: '/orders/check-hash/:address',
+        address,
+        origin: requestOrigin,
+        ip: requestIp,
+      });
       return c.json({ match: false, message: '服务器没有该地址的订单数据' });
     }
     const serverOrderHashes = {};
@@ -696,6 +857,14 @@ app.post('/orders/check-hash/:address', async (c) => {
         allMatch = false;
       }
     }
+    logApiEvent('orders.check_hash.completed', {
+      route: '/orders/check-hash/:address',
+      address,
+      origin: requestOrigin,
+      ip: requestIp,
+      match: allMatch,
+      diffKeyCount: diffKeys.length,
+    });
     return c.json({
       match: allMatch,
       message: allMatch ? '数据完全一致' : '数据不一致，需要更新',
@@ -703,6 +872,13 @@ app.post('/orders/check-hash/:address', async (c) => {
       serverHashes: serverOrderHashes,
     });
   } catch (error) {
+    logApiEvent('orders.check_hash.unhandled_error', {
+      route: '/orders/check-hash/:address',
+      address: c.req.param('address'),
+      origin: c.req.header('origin') || 'unknown',
+      ip: getRequestIp(c.req.raw.headers),
+      error: error.message,
+    });
     return c.json({ match: false, error: error.message }, 500);
   }
 });
@@ -764,6 +940,15 @@ async function relayFetchResponse(response, res) {
 
 async function forwardToHono(req, res) {
   try {
+    if (req.path.startsWith('/orders/push/') || req.path.startsWith('/orders/check-hash/')) {
+      logApiEvent('proxy.route.received', {
+        route: req.path,
+        method: req.method,
+        origin: req.headers.origin || 'unknown',
+        ip: getRequestIp(req.headers),
+      });
+    }
+
     const response = await fetch(`${HONO_API}${req.originalUrl}`, {
       method: req.method,
       headers: buildForwardHeaders(req),
@@ -861,6 +1046,14 @@ async function startServers() {
     });
     console.log(`Hono service running on ${runtimeConfig.internalHost}:${runtimeConfig.honoPort}`);
   }
+
+  logApiEvent('service.starting', {
+    proxyPort: runtimeConfig.proxyPort,
+    honoPort: runtimeConfig.honoPort,
+    wsPort: runtimeConfig.wsPort,
+    corsOrigin: runtimeConfig.corsOrigin,
+    tlsEnabled: runtimeConfig.tlsEnabled,
+  });
 
   startProxyLayer();
   return runtimeState;

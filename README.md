@@ -15,6 +15,7 @@ Default recommendation for VPS deployment:
 - Run Node on `127.0.0.1:3000`
 - Put Nginx or Caddy in front
 - Terminate TLS at the reverse proxy for `acws.alitayin.com`
+- Set `CORS_ORIGIN=https://agora.cash,https://www.agora.cash` if your frontend is served from `agora.cash`
 
 ## Scripts
 
