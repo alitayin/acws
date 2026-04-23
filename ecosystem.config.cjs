@@ -2,10 +2,10 @@ module.exports = {
   apps: [
     {
       name: 'acws',
-      script: 'index.js',
+      script: './index.js',
       interpreter: 'node',
       interpreter_args: '--env-file=.env',
-      cwd: '/opt/acws',
+      cwd: __dirname,
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
